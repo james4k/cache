@@ -21,10 +21,6 @@ import (
 
 var Logger *log.Logger
 
-type cacheItem struct {
-	sync.RWMutex
-}
-
 type cacheHandler struct {
 	sync.RWMutex
 	cachesync sync.Mutex
