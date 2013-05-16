@@ -15,11 +15,10 @@ import (
 )
 
 // TODO:
-// - cache doesn't actually expire yet
-// - provide Cache-Control based on settings and handler provided Cache-Control/Expires
 // - ensure we log everywhere there can be an error, and fallback to original handler
 // - all of the configurables
 // - gzip
+// - perhaps use an Options struct instead of (or to supplement) method chaining
 // - streaming the cache to clients as it's being written? atm all long requests mean long waits
 
 var Logger *log.Logger
@@ -61,7 +60,13 @@ func (c *cacheHandler) Headers(headers ...string) *cacheHandler {
 }
 
 func (c *cacheHandler) Valid(dur time.Duration, statusCodes ...int) *cacheHandler {
-	//c.valid[statusCode] = dur
+	if len(statusCodes) == 0 {
+		c.valid[200] = dur
+	} else {
+		for _, s := range statusCodes {
+			c.valid[s] = dur
+		}
+	}
 	return c
 }
 
@@ -88,16 +93,19 @@ func (c *cacheHandler) log(e error) {
 	}
 }
 
-func (c *cacheHandler) age(statusCode int) int {
-	/*dur, ok := c.ttl[statusCode]
+func (c *cacheHandler) age(code int) time.Duration {
+	dur, ok := c.valid[code]
 	if !ok {
-		dur = c.ttl[200]
-	}*/
-	return 0
+		dur, ok = c.valid[200]
+		if !ok {
+			dur = 10 * time.Minute
+		}
+	}
+	return dur
 }
 
-func (c *cacheHandler) isValid(t time.Time) bool {
-	return true
+func (c *cacheHandler) isValid(code int, t time.Time) bool {
+	return time.Now().Sub(t) <= c.age(code)
 }
 
 type serveState struct {
@@ -120,12 +128,12 @@ var errKeyCollision = errors.New("cache: key collision")
 func (c *cacheHandler) save(st *serveState, w http.ResponseWriter, req *http.Request) {
 	defer c.logrecover()
 	p := &proxyWriter{
+		c:  c,
 		st: st,
 		rw: w,
 		createf: func() io.WriteCloser {
 			f, err := os.OpenFile(st.path, os.O_WRONLY|os.O_CREATE, 0660)
 			if err != nil {
-				c.log(err)
 				panic(err)
 			}
 			return f
@@ -146,20 +154,10 @@ func (c *cacheHandler) read(st *serveState, w http.ResponseWriter, req *http.Req
 	}
 	defer f.Close()
 
-	fi, err := f.Stat()
-	if err != nil {
-		c.log(err)
-		return err
-	}
-	if !c.isValid(fi.ModTime()) {
-		return errExpired
-	}
-
 	br := bufio.NewReader(f)
 	tpr := textproto.NewReader(br)
 	lead, err := tpr.ReadLine()
 	if err != nil {
-		c.log(err)
 		return err
 	}
 
@@ -168,7 +166,6 @@ func (c *cacheHandler) read(st *serveState, w http.ResponseWriter, req *http.Req
 	var crc uint32
 	n, err := fmt.Sscan(lead, &tag, &code, &crc)
 	if err != nil {
-		c.log(err)
 		return err
 	}
 	if n != 3 || tag != "CACHE" || code == 0 || crc == 0 {
@@ -177,10 +174,16 @@ func (c *cacheHandler) read(st *serveState, w http.ResponseWriter, req *http.Req
 	if st.crc != crc {
 		return errKeyCollision
 	}
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !c.isValid(code, fi.ModTime()) {
+		return errExpired
+	}
 
 	hdr, err := tpr.ReadMIMEHeader()
 	if err != nil {
-		c.log(err)
 		return err
 	}
 	c.copyHeader(w.Header(), http.Header(hdr))
@@ -194,8 +197,6 @@ func (c *cacheHandler) read(st *serveState, w http.ResponseWriter, req *http.Req
 }
 
 func (c *cacheHandler) copyHeader(dst, src http.Header) {
-	// TODO: anything we should filter out?
-	// Cache-Control/Expires, probably
 	for k, v := range src {
 		s := make([]string, len(v))
 		copy(s, v)

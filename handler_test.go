@@ -23,10 +23,11 @@ func init() {
 }
 
 func headersEqual(a, b http.Header) bool {
-	if len(a) != len(b) {
-		return false
-	}
 	for k, v := range a {
+		switch k {
+		case "Cache-Control", "Date":
+			continue
+		}
 		vb, ok := b[k]
 		if !ok {
 			return false
@@ -34,11 +35,26 @@ func headersEqual(a, b http.Header) bool {
 		if len(v) != len(vb) {
 			return false
 		}
-		if k == "Date" {
-			continue
-		}
 		for i, s := range v {
 			if s != vb[i] {
+				return false
+			}
+		}
+	}
+	for k, v := range b {
+		switch k {
+		case "Cache-Control", "Date":
+			continue
+		}
+		va, ok := a[k]
+		if !ok {
+			return false
+		}
+		if len(v) != len(va) {
+			return false
+		}
+		for i, s := range v {
+			if s != va[i] {
 				return false
 			}
 		}
