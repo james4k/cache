@@ -7,7 +7,7 @@ import (
 
 type syncher struct {
 	sync.RWMutex
-	writemu sync.Mutex // syncs rlock/lock transition and waitc
+	waitmu  sync.Mutex // syncs rlock/lock transition and waitc
 	refs    int
 	lastref time.Time
 	path    string
@@ -37,18 +37,17 @@ func synch(path string) *syncher {
 
 func (s *syncher) write(f func()) bool {
 	s.RUnlock()
-	s.writemu.Lock()
+	s.waitmu.Lock()
 	s.RLock()
 	if s.waitc != nil {
-		s.writemu.Unlock()
+		s.waitmu.Unlock()
 		<-s.waitc
 		return false
 	} else {
 		s.RUnlock()
 		s.Lock()
 		s.waitc = make(chan struct{})
-		//defer s.RLock()
-		s.writemu.Unlock()
+		s.waitmu.Unlock()
 	}
 	f()
 	close(s.waitc)
