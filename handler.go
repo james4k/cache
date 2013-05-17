@@ -14,22 +14,15 @@ import (
 	"time"
 )
 
-// TODO:
-// - ensure we log everywhere there can be an error, and fallback to original handler
-// - all of the configurables
-// - gzip
-// - perhaps use an Options struct instead of (or to supplement) method chaining
-// - streaming the cache to clients as it's being written? atm all long requests mean long waits
-
 var Logger *log.Logger
 
 type cacheHandler struct {
 	sync.RWMutex
-	dir       string
-	handler   http.Handler
-	key       KeyMask
-	valid     map[int]time.Duration
-	gziplevel int
+	dir     string
+	handler http.Handler
+	key     KeyMask
+	valid   map[int]time.Duration
+	//gziplevel int
 }
 
 func Handler(cachedir string, handler http.Handler) *cacheHandler {
@@ -43,7 +36,7 @@ func Handler(cachedir string, handler http.Handler) *cacheHandler {
 		valid:   make(map[int]time.Duration, 4),
 		key:     Kdefault,
 	}
-	return c.Valid(7*24*time.Hour, 200, 301, 302).Headers("Content-Type")
+	return c.Valid(7*24*time.Hour, 200, 301, 302)
 }
 
 func HandlerFunc(cachedir string, cacheHandler func(http.ResponseWriter, *http.Request)) *cacheHandler {
@@ -52,10 +45,6 @@ func HandlerFunc(cachedir string, cacheHandler func(http.ResponseWriter, *http.R
 
 func (c *cacheHandler) Key(k KeyMask) *cacheHandler {
 	c.key = k
-	return c
-}
-
-func (c *cacheHandler) Headers(headers ...string) *cacheHandler {
 	return c
 }
 
@@ -70,22 +59,13 @@ func (c *cacheHandler) Valid(dur time.Duration, statusCodes ...int) *cacheHandle
 	return c
 }
 
-// Enable gzip compression with level of 0-9. See constants in compress/flate.
-func (c *cacheHandler) Gzip(level int) *cacheHandler {
-	c.gziplevel = level
-	return c
-}
-
-func (c *cacheHandler) UseStale() *cacheHandler {
-	return c
-}
-
-func (c *cacheHandler) Methods() *cacheHandler {
-	return c
-}
+//// Enable gzip compression with level of 0-9. See constants in compress/flate.
+//func (c *cacheHandler) Gzip(level int) *cacheHandler {
+//	c.gziplevel = level
+//	return c
+//}
 
 func (c *cacheHandler) log(e error) {
-	// TODO: may have to use Logger.Output directly so we get a good line number
 	if Logger != nil {
 		Logger.Output(2, e.Error()+"\n")
 	} else {
@@ -149,7 +129,6 @@ func (c *cacheHandler) read(st *serveState, w http.ResponseWriter, req *http.Req
 		if os.IsNotExist(err) {
 			return errInvalidCache
 		}
-		c.log(err)
 		return err
 	}
 	defer f.Close()
@@ -244,5 +223,6 @@ func (c *cacheHandler) serve(st *serveState, w http.ResponseWriter, req *http.Re
 		c.fallback(w, req)
 	default:
 		c.log(err)
+		c.fallback(w, req)
 	}
 }
