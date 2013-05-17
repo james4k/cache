@@ -12,22 +12,19 @@ type KeyMask int
 
 const (
 	// TODO: perhaps Kmethod should just always be implied
-	Kmethod = 1 << iota
-	Kscheme
+	Kscheme = 1 << iota
 	Khost
 	Kpath
 	Kquery
 	Kcookie
-	Kdefault = Kmethod | Kscheme | Kpath | Kquery
+	Kdefault = Kscheme | Kpath | Kquery
 )
 
 func makeKey(mask KeyMask, req *http.Request) (sum string, crc uint32) {
 	h := md5.New()
 	sumb := make([]byte, 0, h.Size())
 	buf := bytes.NewBuffer(make([]byte, 0, 128))
-	if mask&Kmethod != 0 {
-		buf.WriteString(req.Method)
-	}
+	buf.WriteString(req.Method)
 	if mask&Kscheme != 0 {
 		buf.WriteString(req.URL.Scheme)
 	}
