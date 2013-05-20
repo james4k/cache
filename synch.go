@@ -38,20 +38,22 @@ func synch(path string) *syncher {
 func (s *syncher) write(f func()) bool {
 	s.RUnlock()
 	s.waitmu.Lock()
-	s.RLock()
 	if s.waitc != nil {
+		waitc := s.waitc
 		s.waitmu.Unlock()
-		<-s.waitc
+		<-waitc
+		s.RLock()
 		return false
 	} else {
-		s.RUnlock()
 		s.Lock()
 		s.waitc = make(chan struct{})
 		s.waitmu.Unlock()
 	}
 	f()
 	close(s.waitc)
+	s.waitmu.Lock()
 	s.waitc = nil
+	s.waitmu.Unlock()
 	s.Unlock()
 	s.RLock()
 	return true
