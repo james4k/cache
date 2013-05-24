@@ -35,7 +35,7 @@ func synch(path string) *syncher {
 	return s
 }
 
-func (s *syncher) write(f func()) bool {
+func (s *syncher) write(f func(func())) bool {
 	s.RUnlock()
 	s.waitmu.Lock()
 	if s.waitc != nil {
@@ -45,11 +45,10 @@ func (s *syncher) write(f func()) bool {
 		s.RLock()
 		return false
 	} else {
-		s.Lock()
 		s.waitc = make(chan struct{})
 		s.waitmu.Unlock()
 	}
-	f()
+	f(s.Lock)
 	close(s.waitc)
 	s.waitmu.Lock()
 	s.waitc = nil

@@ -14,41 +14,53 @@ import (
 	"time"
 )
 
+type UseStaleMask int
+
+// UseStale options. Serve old cache when...
+const (
+	Supdating = 1 << iota // cache is being updated; prevents stampeding while waiting on a request
+	//Serror                // error occured during user handler's ServeHTTP
+	//S404                  // status of 404 is received
+	//S500                  // status of 500 is received
+	//S50x                  // status of 500-505 is received
+)
+
 var Logger *log.Logger
 
-type cacheHandler struct {
+type CacheHandler struct {
 	sync.RWMutex
-	dir     string
-	handler http.Handler
-	key     KeyMask
-	valid   map[int]time.Duration
+	dir      string
+	handler  http.Handler
+	key      KeyMask
+	valid    map[int]time.Duration
+	useStale UseStaleMask
 	//gziplevel int
 }
 
-func Handler(cachedir string, handler http.Handler) *cacheHandler {
+func Handler(cachedir string, handler http.Handler) *CacheHandler {
 	absdir, err := filepath.Abs(cachedir)
 	if err != nil {
 		absdir = cachedir
 	}
-	c := &cacheHandler{
+	c := &CacheHandler{
 		dir:     absdir,
 		handler: handler,
-		valid:   make(map[int]time.Duration, 4),
+		valid:   make(map[int]time.Duration),
 		key:     Kdefault,
 	}
 	return c.Valid(7*24*time.Hour, 200, 301, 302)
 }
 
-func HandlerFunc(cachedir string, cacheHandler func(http.ResponseWriter, *http.Request)) *cacheHandler {
-	return Handler(cachedir, http.HandlerFunc(cacheHandler))
+func HandlerFunc(cachedir string, handler func(http.ResponseWriter, *http.Request)) *CacheHandler {
+	return Handler(cachedir, http.HandlerFunc(handler))
 }
 
-func (c *cacheHandler) Key(k KeyMask) *cacheHandler {
+func (c *CacheHandler) Key(k KeyMask) *CacheHandler {
 	c.key = k
 	return c
 }
 
-func (c *cacheHandler) Valid(dur time.Duration, statusCodes ...int) *cacheHandler {
+func (c *CacheHandler) Valid(dur time.Duration, statusCodes ...int) *CacheHandler {
 	if len(statusCodes) == 0 {
 		c.valid[200] = dur
 	} else {
@@ -59,21 +71,24 @@ func (c *cacheHandler) Valid(dur time.Duration, statusCodes ...int) *cacheHandle
 	return c
 }
 
+func (c *CacheHandler) UseStale(u UseStaleMask) *CacheHandler {
+	c.useStale = u
+	return c
+}
+
 //// Enable gzip compression with level of 0-9. See constants in compress/flate.
-//func (c *cacheHandler) Gzip(level int) *cacheHandler {
+//func (c *CacheHandler) Gzip(level int) *CacheHandler {
 //	c.gziplevel = level
 //	return c
 //}
 
-func (c *cacheHandler) log(e error) {
+func (c *CacheHandler) log(e error) {
 	if Logger != nil {
 		Logger.Output(2, e.Error()+"\n")
-	} else {
-		log.Println(e)
 	}
 }
 
-func (c *cacheHandler) age(code int) time.Duration {
+func (c *CacheHandler) age(code int) time.Duration {
 	dur, ok := c.valid[code]
 	if !ok {
 		dur, ok = c.valid[200]
@@ -84,18 +99,19 @@ func (c *cacheHandler) age(code int) time.Duration {
 	return dur
 }
 
-func (c *cacheHandler) isValid(code int, t time.Time) bool {
+func (c *CacheHandler) isValid(code int, t time.Time) bool {
 	return time.Now().Sub(t) <= c.age(code)
 }
 
 type serveState struct {
 	*syncher
-	key, path  string
-	crc        uint32
-	recursions int
+	key, path, tmpPath string
+	crc                uint32
+	recursions         int
+	wrlock             sync.Locker
 }
 
-func (c *cacheHandler) logrecover() {
+func (c *CacheHandler) logrecover() {
 	if err, ok := recover().(error); ok {
 		c.log(err)
 	}
@@ -105,14 +121,15 @@ var errExpired = errors.New("cache: expired")
 var errInvalidCache = errors.New("cache: invalid header")
 var errKeyCollision = errors.New("cache: key collision")
 
-func (c *cacheHandler) save(st *serveState, w http.ResponseWriter, req *http.Request) {
+func (c *CacheHandler) save(st *serveState, lock func(), w http.ResponseWriter, req *http.Request) {
 	defer c.logrecover()
 	p := &proxyWriter{
-		c:  c,
-		st: st,
-		rw: w,
+		c:    c,
+		st:   st,
+		rw:   w,
+		lock: lock,
 		createf: func() io.WriteCloser {
-			f, err := os.OpenFile(st.path, os.O_WRONLY|os.O_CREATE, 0660)
+			f, err := os.OpenFile(st.tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0660)
 			if err != nil {
 				panic(err)
 			}
@@ -123,7 +140,7 @@ func (c *cacheHandler) save(st *serveState, w http.ResponseWriter, req *http.Req
 	c.handler.ServeHTTP(p, req)
 }
 
-func (c *cacheHandler) read(st *serveState, w http.ResponseWriter, req *http.Request) error {
+func (c *CacheHandler) read(st *serveState, w http.ResponseWriter, req *http.Request) error {
 	f, err := os.Open(st.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -157,7 +174,7 @@ func (c *cacheHandler) read(st *serveState, w http.ResponseWriter, req *http.Req
 	if err != nil {
 		return err
 	}
-	if !c.isValid(code, fi.ModTime()) {
+	if c.useStale&Supdating == 0 && !c.isValid(code, fi.ModTime()) {
 		return errExpired
 	}
 
@@ -175,7 +192,7 @@ func (c *cacheHandler) read(st *serveState, w http.ResponseWriter, req *http.Req
 	return nil
 }
 
-func (c *cacheHandler) copyHeader(dst, src http.Header) {
+func (c *CacheHandler) copyHeader(dst, src http.Header) {
 	for k, v := range src {
 		s := make([]string, len(v))
 		copy(s, v)
@@ -183,17 +200,19 @@ func (c *cacheHandler) copyHeader(dst, src http.Header) {
 	}
 }
 
-func (c *cacheHandler) fallback(w http.ResponseWriter, req *http.Request) {
+func (c *CacheHandler) fallback(w http.ResponseWriter, req *http.Request) {
 	c.handler.ServeHTTP(w, req)
 }
 
-func (c *cacheHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+func (c *CacheHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	defer c.logrecover()
 	key, crc := makeKey(c.key, req)
 	path := filepath.Join(c.dir, key)
+	tmpPath := filepath.Join(c.dir, "updating"+key)
 	st := &serveState{
 		syncher: synch(path),
 		path:    path,
+		tmpPath: tmpPath,
 		key:     key,
 		crc:     crc,
 	}
@@ -201,13 +220,13 @@ func (c *cacheHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	c.serve(st, w, req)
 }
 
-func (c *cacheHandler) serve(st *serveState, w http.ResponseWriter, req *http.Request) {
+func (c *CacheHandler) serve(st *serveState, w http.ResponseWriter, req *http.Request) {
 	err := c.read(st, w, req)
 	switch err {
 	case nil:
 	case errExpired, errInvalidCache:
-		written := st.write(func() {
-			c.save(st, w, req)
+		written := st.write(func(lock func()) {
+			c.save(st, lock, w, req)
 		})
 		// if we didn't write, than another request did and we should try reading again
 		if !written {

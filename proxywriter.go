@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/textproto"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -13,8 +14,9 @@ import (
 
 // proxyWriter writes to the ResponseWriter and the cache
 type proxyWriter struct {
-	c          *cacheHandler
+	c          *CacheHandler
 	st         *serveState
+	lock       func() // syncher lock
 	rw         http.ResponseWriter
 	statusCode int
 	createf    func() io.WriteCloser
@@ -69,6 +71,11 @@ func (p *proxyWriter) Close() {
 	if p.f != nil {
 		p.bw.Flush()
 		p.f.Close()
+		if p.c.useStale&Supdating != 0 {
+			p.lock()
+		}
+		os.Remove(p.st.path)
+		os.Rename(p.st.tmpPath, p.st.path)
 	}
 }
 
@@ -80,6 +87,9 @@ Headers: Values\r\n
 <body>
 */
 func (p *proxyWriter) cacheHeader() {
+	if p.c.useStale&Supdating == 0 {
+		p.lock()
+	}
 	hdr := p.rw.Header()
 	p.f = p.createf()
 	p.bw = bufio.NewWriter(p.f)
